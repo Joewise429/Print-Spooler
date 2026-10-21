@@ -1,0 +1,471 @@
+<title>Print Spooler</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=Schibsted+Grotesk:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+/* Layout: stats and controls on top, a queue lane feeding a printer panel, then the job form, activity log and the queue source. */
+:root {
+  --bg: #f1f4f6;
+  --surface: #ffffff;
+  --fg: #13202b;
+  --muted: #566776;
+  --line: #d3dbe1;
+  --accent: #0a6ea8;
+  --accent-fg: #ffffff;
+  --accent-soft: #e2f0f9;
+  --ok: #1e7a4c;
+  --warn: #9a5a00;
+  --bad: #b3261e;
+  --code-bg: #eaeff3;
+  --font-body: "Schibsted Grotesk", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e151b;
+    --surface: #16212a;
+    --fg: #e6edf2;
+    --muted: #94a4b1;
+    --line: #2a3844;
+    --accent: #4db3e8;
+    --accent-fg: #06222f;
+    --accent-soft: #14303f;
+    --ok: #5cc995;
+    --warn: #e8a547;
+    --bad: #f28b82;
+    --code-bg: #101a22;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0e151b;
+  --surface: #16212a;
+  --fg: #e6edf2;
+  --muted: #94a4b1;
+  --line: #2a3844;
+  --accent: #4db3e8;
+  --accent-fg: #06222f;
+  --accent-soft: #14303f;
+  --ok: #5cc995;
+  --warn: #e8a547;
+  --bad: #f28b82;
+  --code-bg: #101a22;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: var(--font-body);
+  font-size: 15px;
+  line-height: 1.5;
+  padding-block: 28px 48px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+.page { max-width: 1040px; margin: 0 auto; display: flex; flex-direction: column; gap: 28px; }
+.mono, code, pre, .num { font-family: var(--font-mono); }
+.num { font-variant-numeric: tabular-nums; }
+
+/* header */
+.top { display: flex; flex-wrap: wrap; gap: 20px 32px; align-items: flex-end; justify-content: space-between; }
+.top h1 { margin: 0; font-size: clamp(26px, 4vw, 34px); line-height: 1.1; font-weight: 700; letter-spacing: -0.01em; text-wrap: balance; }
+.top p { margin: 6px 0 0; color: var(--muted); max-width: 46ch; }
+.stats { display: flex; flex-wrap: wrap; gap: 8px 28px; margin: 0; }
+.stats div { display: flex; flex-direction: column; min-width: 0; }
+.stats dt { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.stats dd { margin: 0; font-size: 24px; line-height: 1.2; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+/* controls */
+.controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding-bottom: 20px; border-bottom: 1px solid var(--line); }
+.btn {
+  font: inherit; font-weight: 500; cursor: pointer;
+  border-radius: 6px; padding: 8px 14px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--fg);
+}
+.btn.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.btn:focus-visible, input:focus-visible, select:focus-visible, .link:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.check { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; }
+.check input { width: 16px; height: 16px; accent-color: var(--accent); }
+.field-inline { display: inline-flex; align-items: center; gap: 8px; color: var(--muted); }
+select, input[type="text"], input[type="number"] {
+  font: inherit; color: var(--fg); background: var(--surface);
+  border: 1px solid var(--line); border-radius: 6px; padding: 7px 10px; min-width: 0;
+}
+.spacer { flex: 1 1 0; }
+
+/* queue + printer */
+h2 { margin: 0; font-size: 13px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.board { display: grid; grid-template-columns: minmax(0, 1fr) 270px; gap: 20px; align-items: stretch; }
+.queue-col { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
+.queue-head { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; align-items: baseline; }
+.queue-head small { color: var(--muted); }
+.lane-wrap { overflow-x: auto; padding-bottom: 6px; }
+.lane { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: row-reverse; gap: 10px; min-height: 124px; }
+.job {
+  flex: 0 0 160px; min-width: 0;
+  display: flex; flex-direction: column; gap: 3px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;
+}
+.job.front { border-color: var(--accent); background: var(--accent-soft); }
+.job .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; min-height: 20px; }
+.job .id { font-family: var(--font-mono); font-weight: 500; }
+.chip { font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; font-weight: 700; color: var(--muted); }
+.job.front .chip.f { color: var(--accent); }
+.job .doc { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job .meta { color: var(--muted); font-size: 13px; }
+.link { font: inherit; font-size: 13px; color: var(--bad); background: none; border: 0; padding: 0; cursor: pointer; text-decoration: underline; text-underline-offset: 3px; align-self: flex-start; margin-top: 2px; }
+.empty { flex: 1; border: 1px dashed var(--line); border-radius: 6px; padding: 18px; color: var(--muted); display: flex; align-items: center; }
+.caps { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; color: var(--muted); }
+
+.printer { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 16px; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.printer-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.pill { font-size: 12px; font-weight: 700; padding: 2px 10px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); }
+.pill.busy { color: var(--ok); border-color: var(--ok); }
+.now { min-height: 44px; }
+.now .doc { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.now .meta { color: var(--muted); font-size: 13px; }
+.bar { height: 10px; border-radius: 99px; background: var(--code-bg); border: 1px solid var(--line); overflow: hidden; }
+.bar > i { display: block; height: 100%; width: 0; background: var(--accent); }
+.pages { font-size: 13px; color: var(--muted); display: flex; justify-content: space-between; }
+
+/* form */
+.panel { display: flex; flex-direction: column; gap: 12px; }
+.form { display: grid; grid-template-columns: 1fr 1.5fr 110px auto; gap: 12px; align-items: end; }
+.form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); min-width: 0; }
+.form input { width: 100%; }
+.msg { min-height: 20px; margin: 0; font-size: 13px; color: var(--bad); }
+
+/* log */
+.log { list-style: none; margin: 0; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--surface); max-height: 230px; overflow-y: auto; }
+.log li { display: flex; gap: 14px; padding: 7px 12px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.log li:last-child { border-bottom: 0; }
+.log time { font-family: var(--font-mono); color: var(--muted); flex: none; }
+.log span { min-width: 0; overflow-wrap: anywhere; }
+
+@media (max-width: 760px) {
+  .board { grid-template-columns: minmax(0, 1fr); }
+  .form { grid-template-columns: minmax(0, 1fr); }
+  .lane { flex-direction: column; min-height: 0; }
+  .job { flex-basis: auto; }
+  .caps { display: none; }
+  .spacer { display: none; }
+}
+</style>
+
+<div class="page">
+  <header class="top">
+    <div>
+      <h1>Print Spooler</h1>
+      <p>One shared printer, many users. Jobs wait in a first-in, first-out queue and print in the order they arrived.</p>
+    </div>
+    <dl class="stats" aria-label="Spooler totals">
+      <div><dt>Waiting</dt><dd id="s-wait">0</dd></div>
+      <div><dt>Printed</dt><dd id="s-printed">0</dd></div>
+      <div><dt>Pages out</dt><dd id="s-pages">0</dd></div>
+      <div><dt>Cancelled</dt><dd id="s-cancel">0</dd></div>
+    </dl>
+  </header>
+
+  <section class="controls" aria-label="Printer controls">
+    <button class="btn primary" id="btn-next" type="button">Print next</button>
+    <label class="check" for="auto"><input type="checkbox" id="auto"> Print automatically</label>
+    <label class="field-inline" for="speed">Speed
+      <select id="speed">
+        <option value="600">Slow</option>
+        <option value="300" selected>Normal</option>
+        <option value="120">Fast</option>
+      </select>
+    </label>
+    <span class="spacer"></span>
+    <button class="btn" id="btn-jam" type="button">Simulate paper jam</button>
+  </section>
+
+  <section class="board" aria-label="Queue and printer">
+    <div class="queue-col">
+      <div class="queue-head">
+        <h2>Queue</h2>
+        <small>Ama, Kofi and Esi are example jobs. Print or cancel them, or add your own below.</small>
+      </div>
+      <div class="lane-wrap"><ol class="lane" id="lane" aria-label="Waiting print jobs, front of queue first"></ol></div>
+      <div class="caps"><span>Rear. New jobs join here.</span><span>Front. Prints next.</span></div>
+    </div>
+    <aside class="printer" aria-label="Printer">
+      <div class="printer-head"><h2>Printer</h2><span class="pill" id="pill">Idle</span></div>
+      <div class="now" id="now"><div class="doc">Nothing printing</div><div class="meta">Waiting for the front job</div></div>
+      <div class="bar" role="progressbar" aria-label="Print progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" id="bar"><i id="fill"></i></div>
+      <div class="pages"><span id="pg-done">0 pages</span><span id="pg-total">of 0</span></div>
+    </aside>
+  </section>
+
+  <section class="panel" aria-label="Submit a job">
+    <h2>Submit a job</h2>
+    <form class="form" id="form" novalidate>
+      <label for="f-user">User<input type="text" id="f-user" value="Yaw" autocomplete="off"></label>
+      <label for="f-doc">Document<input type="text" id="f-doc" value="Budget.xlsx" autocomplete="off"></label>
+      <label for="f-pages">Pages<input type="number" id="f-pages" value="8" min="1" max="200"></label>
+      <button class="btn primary" type="submit">Add to queue</button>
+    </form>
+    <p class="msg" id="msg" role="alert"></p>
+  </section>
+
+  <section class="panel" aria-label="Activity">
+    <h2>Activity</h2>
+    <ul class="log" id="log" aria-live="polite"></ul>
+  </section>
+
+</div>
+
+<script>
+class PrintSpooler {
+  constructor() {
+    this.items = [];
+    this.head = 0;
+  }
+  get size() {
+    return this.items.length - this.head;
+  }
+  enqueue(job) {
+    this.items.push(job);
+  }
+  dequeue() {
+    if (this.size === 0) return null;
+    const job = this.items[this.head];
+    this.items[this.head] = undefined;
+    this.head++;
+    if (this.head > 32 && this.head * 2 > this.items.length) {
+      this.items = this.items.slice(this.head);
+      this.head = 0;
+    }
+    return job;
+  }
+  peek() {
+    return this.size ? this.items[this.head] : null;
+  }
+  cancel(id) {
+    for (let i = this.head; i < this.items.length; i++) {
+      if (this.items[i].id === id) {
+        this.items.splice(i, 1);
+        return true;
+      }
+    }
+    return false;
+  }
+  toArray() {
+    return this.items.slice(this.head);
+  }
+}
+
+(function () {
+  var spooler = new PrintSpooler();
+  var current = null;
+  var nextId = 1;
+  var stats = { printed: 0, pages: 0, cancelled: 0 };
+  var logLines = [];
+
+  function $(id) { return document.getElementById(id); }
+  function speed() { return parseInt($('speed').value, 10) || 300; }
+  function plural(n, w) { return n + ' ' + w + (n === 1 ? '' : 's'); }
+
+  function log(text) {
+    var t = new Date().toLocaleTimeString('en-GB');
+    logLines.unshift({ t: t, text: text });
+    if (logLines.length > 40) logLines.pop();
+  }
+
+  function submit(user, doc, pages) {
+    var job = { id: nextId++, user: user, document: doc, pages: pages };
+    spooler.enqueue(job);
+    log('Queued #' + job.id + ': ' + doc + ' (' + user + ', ' + plural(pages, 'page') + ')');
+    maybeAuto();
+    return job;
+  }
+
+  function startJob(job) {
+    current = { job: job, done: 0, timer: null };
+    log('Printing #' + job.id + ': ' + job.document);
+    current.timer = setTimeout(step, speed());
+  }
+
+  function step() {
+    if (!current) return;
+    current.done++;
+    if (current.done >= current.job.pages) {
+      var job = current.job;
+      stats.printed++;
+      stats.pages += job.pages;
+      log('Finished #' + job.id + ': ' + job.document);
+      current = null;
+      maybeAuto();
+    } else {
+      current.timer = setTimeout(step, speed());
+    }
+    render();
+  }
+
+  function printNext() {
+    if (current) { log('Printer is busy.'); render(); return; }
+    var job = spooler.dequeue();
+    if (!job) { log('No jobs waiting.'); render(); return; }
+    startJob(job);
+    render();
+  }
+
+  function cancel(id) {
+    if (spooler.cancel(id)) {
+      stats.cancelled++;
+      log('Cancelled #' + id);
+    }
+    render();
+  }
+
+  function jam() {
+    if (!current) return;
+    clearTimeout(current.timer);
+    var job = current.job;
+    current = null;
+    spooler.enqueue(job);
+    log('Paper jam on #' + job.id + '. Re-queued at the rear.');
+    maybeAuto();
+    render();
+  }
+
+  function maybeAuto() {
+    if ($('auto').checked && !current && spooler.size) {
+      startJob(spooler.dequeue());
+    }
+  }
+
+  function jobCard(job, index, total) {
+    var li = document.createElement('li');
+    li.className = 'job' + (index === 0 ? ' front' : '');
+
+    var row = document.createElement('div');
+    row.className = 'row';
+    var id = document.createElement('span');
+    id.className = 'id';
+    id.textContent = '#' + job.id;
+    var chip = document.createElement('span');
+    chip.className = 'chip' + (index === 0 ? ' f' : '');
+    var labels = [];
+    if (index === 0) labels.push('Front');
+    if (index === total - 1) labels.push('Rear');
+    chip.textContent = labels.join(' · ');
+    row.append(id, chip);
+
+    var doc = document.createElement('div');
+    doc.className = 'doc';
+    doc.textContent = job.document;
+    doc.title = job.document;
+
+    var meta = document.createElement('div');
+    meta.className = 'meta';
+    meta.textContent = job.user + ' · ' + plural(job.pages, 'page');
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'link';
+    btn.textContent = 'Cancel';
+    btn.setAttribute('aria-label', 'Cancel job ' + job.id + ', ' + job.document);
+    btn.addEventListener('click', function () { cancel(job.id); });
+
+    li.append(row, doc, meta, btn);
+    return li;
+  }
+
+  function render() {
+    var jobs = spooler.toArray();
+    $('s-wait').textContent = jobs.length;
+    $('s-printed').textContent = stats.printed;
+    $('s-pages').textContent = stats.pages;
+    $('s-cancel').textContent = stats.cancelled;
+
+    var lane = $('lane');
+    lane.replaceChildren();
+    if (!jobs.length) {
+      var empty = document.createElement('li');
+      empty.className = 'empty';
+      empty.textContent = 'The queue is empty. Add a job below and it joins at the rear.';
+      lane.append(empty);
+    } else {
+      jobs.forEach(function (j, i) { lane.append(jobCard(j, i, jobs.length)); });
+    }
+
+    var now = $('now');
+    var pct = 0;
+    if (current) {
+      var j = current.job;
+      pct = Math.round((current.done / j.pages) * 100);
+      now.replaceChildren();
+      var d = document.createElement('div');
+      d.className = 'doc';
+      d.textContent = '#' + j.id + ' ' + j.document;
+      var m = document.createElement('div');
+      m.className = 'meta';
+      m.textContent = j.user;
+      now.append(d, m);
+      $('pill').textContent = 'Printing';
+      $('pill').className = 'pill busy';
+      $('pg-done').textContent = plural(current.done, 'page');
+      $('pg-total').textContent = 'of ' + j.pages;
+    } else {
+      now.replaceChildren();
+      var d2 = document.createElement('div');
+      d2.className = 'doc';
+      d2.textContent = 'Nothing printing';
+      var m2 = document.createElement('div');
+      m2.className = 'meta';
+      m2.textContent = jobs.length ? 'Next up: #' + jobs[0].id + ' ' + jobs[0].document : 'Waiting for jobs';
+      now.append(d2, m2);
+      $('pill').textContent = 'Idle';
+      $('pill').className = 'pill';
+      $('pg-done').textContent = '0 pages';
+      $('pg-total').textContent = 'of 0';
+    }
+    $('fill').style.width = pct + '%';
+    $('bar').setAttribute('aria-valuenow', String(pct));
+
+    $('btn-next').disabled = !!current || !jobs.length;
+    $('btn-jam').disabled = !current;
+
+    var log = $('log');
+    log.replaceChildren();
+    logLines.forEach(function (l) {
+      var li = document.createElement('li');
+      var t = document.createElement('time');
+      t.textContent = l.t;
+      var s = document.createElement('span');
+      s.textContent = l.text;
+      li.append(t, s);
+      log.append(li);
+    });
+  }
+
+  $('btn-next').addEventListener('click', printNext);
+  $('btn-jam').addEventListener('click', jam);
+  $('auto').addEventListener('change', function () { maybeAuto(); render(); });
+
+  $('form').addEventListener('submit', function (e) {
+    e.preventDefault();
+    var user = $('f-user').value.trim();
+    var doc = $('f-doc').value.trim();
+    var pages = parseInt($('f-pages').value, 10);
+    var msg = $('msg');
+    if (!user || !doc) { msg.textContent = 'Enter a user name and a document name.'; return; }
+    if (!(pages >= 1 && pages <= 200)) { msg.textContent = 'Pages must be a whole number from 1 to 200.'; return; }
+    msg.textContent = '';
+    submit(user, doc, pages);
+    $('f-doc').value = '';
+    $('f-doc').focus();
+    render();
+  });
+
+  submit('Ama', 'Report.docx', 12);
+  submit('Kofi', 'Invoice.pdf', 2);
+  submit('Esi', 'Slides.pptx', 30);
+  render();
+})();
+</script>
